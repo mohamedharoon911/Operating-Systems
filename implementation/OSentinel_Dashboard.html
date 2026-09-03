@@ -1,0 +1,71 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OSentinel — App Launcher</title>
+    <style>
+        body {
+            background-color: #020617;
+            color: #f8fafc;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            margin: 0;
+        }
+        .card {
+            background-color: #0f172a;
+            border: 1px solid #1e293b;
+            border-radius: 16px;
+            padding: 32px;
+            max-width: 480px;
+            text-align: center;
+            box-shadow: 0 20px 25px -5px rgba(0,0,0,0.5);
+        }
+        h1 { margin-top: 0; color: #38bdf8; }
+        p { color: #94a3b8; font-size: 14px; line-height: 1.5; }
+        .btn {
+            display: inline-block;
+            background: linear-gradient(135deg, #0284c7, #2563eb);
+            color: white;
+            padding: 12px 28px;
+            border-radius: 10px;
+            text-decoration: none;
+            font-weight: bold;
+            font-size: 15px;
+            margin-top: 20px;
+            box-shadow: 0 4px 12px rgba(2, 132, 199, 0.4);
+            transition: transform 0.1s ease;
+        }
+        .btn:hover { transform: scale(1.02); }
+        .status { margin-top: 16px; font-size: 12px; color: #10b981; font-weight: bold; }
+    </style>
+</head>
+<body>
+    <div class="card">
+        <h1>OSentinel Protection System</h1>
+        <p>Autonomous OS Process Anomaly Detection, Isolation & Self-Recovery</p>
+        <div id="status-box" class="status">Connecting to OSentinel Engine...</div>
+        <a href="http://localhost:8000" id="launch-btn" class="btn">Open OSentinel Dashboard</a>
+    </div>
+
+    <script>
+        async function checkServer() {
+            try {
+                const res = await fetch('http://localhost:8000/api/overview');
+                if (res.ok) {
+                    document.getElementById('status-box').innerHTML = "🟢 OSentinel Engine Active & Running!";
+                    window.location.href = "http://localhost:8000";
+                }
+            } catch (e) {
+                document.getElementById('status-box').innerHTML = "🟡 Server offline. Please double-click OSentinel.bat to start.";
+                document.getElementById('status-box').style.color = "#f59e0b";
+            }
+        }
+        checkServer();
+        setInterval(checkServer, 2000);
+    </script>
+</body>
+</html>
