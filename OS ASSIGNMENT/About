@@ -1,0 +1,110 @@
+1. Problem Understanding and Formulation
+1.1 Restatement of the Problem
+UniCore is the computing platform of a smart university that must serve roughly 500 concurrent users under normal operation and more than 800 concurrent users during online examination windows. It hosts six distinct classes of service on shared infrastructure: online examination processing, digital classrooms, digital-library access, research computing jobs, automated backup services, and campus IoT monitoring. These services differ sharply in character — examination and classroom traffic is interactive and latency-sensitive, library access is bursty, research jobs and backups are long-running and CPU/IO-heavy, and IoT monitoring is a steady trickle of small, frequent updates. All of them compete for the same finite CPU time, physical memory, shared files (examination records and logs in particular) and disk bandwidth. The task set by this assignment is to act as the OS design team for UniCore: to choose and justify, with calculation rather than assertion, how process scheduling, synchronization, deadlock handling, memory management and file/disk scheduling should be configured so the platform remains correct (no data corruption, no unresolved deadlock) and responsive (low waiting/response time for interactive users, bounded page faults, low disk-head travel) at this scale.
+1.2 Core Challenges Identified
+●	CPU challenge: interactive exam/classroom requests need low response time, while backup and research jobs are long and would starve short jobs under naive FCFS scheduling; a policy is needed that favours interactive work without permanently starving background work.
+●	Synchronization challenge: many processes read and a smaller number write shared examination records and system logs concurrently; uncoordinated access risks race conditions (e.g. two grading processes updating the same score file) and lost updates.
+●	Deadlock challenge: processes hold and request a mix of database connections, file locks, print/report-generation slots and backup/IO channels; circular-wait conditions are possible unless resource requests are checked against a safety criterion before being granted.
+●	Memory challenge: 500–800 concurrent processes must share a physically limited 16 GB of RAM; each process’s logical address space must be mapped through page tables to a much smaller set of physical frames, and the page-replacement policy chosen directly determines how many page faults (and therefore how much disk I/O and stall time) the exam-period workload experiences.
+●	File-system and disk challenge: UniCore stores files of very different sizes and access patterns — small student records, medium documents, and large lecture-recording videos — and must service many simultaneous disk requests fairly and with minimal head movement, especially during exam periods when many students submit simultaneously.
+1.3 Workload Definition and Assumptions
+Because the brief asks the design team to construct its own workload, the following concrete, internally consistent workload is defined and used throughout this report for every calculation (Sections 2–6):
+●	Process set: 8 representative UniCore processes are modelled — two exam-related interactive services (exam-submit, exam-fetch), one exam-autosave background-but-time-sensitive task, one library-index service, one research-computing job, one IoT-monitoring service, and two backup/verification jobs — with the arrival times, CPU burst lengths and priorities given in Table 2.1 (Section 2, Part I, Q8).
+●	Resource types for deadlock analysis: four shared resource pools are modelled — Database connections (DB, capacity 9), File locks (FL, capacity 6), Print/report-generation slots (PR, capacity 5), and Backup/IO channels (BK, capacity 9) — with eight processes competing for them, as required by the brief’s minimum of 4 processes/4 resource types (this report uses 8 processes to match the CPU-scheduling workload).
+●	Memory: physical RAM = 16 GB, page size = 4 KB (both as specified in the brief), and a representative UniCore application process is assumed to occupy a 64 MB logical address space, as specified.
+●	Disk: a 200-cylinder disk (as specified) with an initial head position of cylinder 53 and twelve simultaneous pending disk requests, exceeding the brief’s minimum of 10.
+●	Page-reference behaviour: a 16-reference page-access string is used to model a student navigating an exam paper / library document with realistic locality and repetition, evaluated for both 3 and 4 available frames as required.
+1.4 Measurable Objectives
+The design is judged against the following quantitative objectives, each of which is measured directly from the simulations in Sections 2 and 5 rather than estimated qualitatively:
+●	Minimise average waiting time and response time for interactive (exam) processes under the chosen CPU-scheduling policy, without indefinitely starving background jobs.
+●	Guarantee the shared-resource allocation system never enters an unsafe/deadlocked state, verified by an explicit Banker’s Algorithm safety trace and an explicit unsafe-request demonstration.
+●	Minimise page faults for the defined 16-reference workload at both 3 and 4 frames, comparing FIFO, LRU and Optimal.
+●	Minimise total disk-head movement (in cylinders) for the 12-request disk workload, comparing FCFS, SSTF, SCAN and C-SCAN.
+●	Select a file-allocation strategy appropriate to each of the three file-size/access-pattern categories UniCore stores.
+1.5 Constraints the Final Design Must Satisfy
+●	Must support at least 8 concurrent processes and 4 resource types without race conditions on shared examination records (Functional / Reliability constraints).
+●	Must operate within 16 GB physical RAM at a 4 KB page size, and must identify and mitigate thrashing risk at the 800-user exam-period peak (Memory constraint).
+●	Must schedule at least 10 pending requests on a 200-cylinder disk while balancing seek efficiency against fairness (Storage constraint).
+●	Must explicitly identify unsafe/deadlock states and provide an avoidance, detection or recovery mechanism rather than relying on hope (Reliability constraint).
+●	Must be implemented and validated using open-source tools (Python was used throughout this report for all simulations, listed in Section 4 and Appendix A) (Technical constraint).
+●	Must preserve access control and data integrity on shared academic files (Security/Privacy constraint).
+ 
+2. Application of Course Knowledge
+Part I — Process Management, Synchronization & Deadlock (CO2)
+Q4. Synchronization model for shared examination-record access
+Shared examination records are read far more often than they are written: many services (grading dashboards, student result checks, analytics jobs) read a record for every one grading process that writes a final score. This access pattern is modelled as the classical Readers–Writers problem, using the writer-priority variant so that a pending score update is not indefinitely delayed by a continuous stream of readers (a risk in the reader-priority variant, and an important correctness property for exam integrity — stale reads of an unposted score are relatively harmless, but indefinitely delayed score writes are not).
+// Shared state
+semaphore rw_mutex = 1     // guards the examination-record data itself
+semaphore mutex_r  = 1     // guards read_count
+semaphore mutex_w  = 1     // guards write_count (writer-priority bookkeeping)
+semaphore queue    = 1     // FIFO fairness gate, prevents new readers overtaking a waiting writer
+int read_count  = 0
+int write_count = 0
+ 
+Reader process (e.g. result-check / grading-dashboard service):
+    wait(queue)
+        wait(mutex_r)
+            read_count++
+            if read_count == 1: wait(rw_mutex)   // first reader locks out writers
+        signal(mutex_r)
+    signal(queue)
+ 
+    READ the examination record
+ 
+    wait(mutex_r)
+        read_count--
+        if read_count == 0: signal(rw_mutex)     // last reader releases writers
+    signal(mutex_r)
+ 
+Writer process (e.g. score-posting / grading-finalisation service):
+    wait(mutex_w)
+        write_count++
+        if write_count == 1: wait(queue)          // block new readers once a writer is waiting
+    signal(mutex_w)
+ 
+    wait(rw_mutex)
+        WRITE / UPDATE the examination record
+    signal(rw_mutex)
+ 
+    wait(mutex_w)
+        write_count--
+        if write_count == 0: signal(queue)        // allow readers to resume once no writers pending
+    signal(mutex_w)
+Pseudocode — writer-priority Readers–Writers synchronization for shared examination records.
+This design prevents race conditions in two complementary ways. First, rw_mutex ensures mutual exclusion between any writer and the group of active readers: a writer never executes its critical section while even one reader is mid-read, and no reader can begin once a writer holds rw_mutex, so a torn or inconsistent record can never be observed. Second, the queue semaphore is acquired as soon as the first writer becomes pending and only released once the last pending writer finishes, which blocks new readers from continually re-entering ahead of a waiting writer — preventing writer starvation, the specific failure mode most damaging to examination integrity (a submitted grade correction must not be postponed indefinitely by a continuous stream of dashboard refreshes).
+Q5–6. Banker’s Algorithm: Allocation, Max, Need, Safety and an Unsafe Request
+Four shared resource pools are modelled: DB = database connections (total 9), FL = file locks (total 6), PR = print/report-generation slots (total 5), and BK = backup/IO channels (total 9). Eight UniCore processes P0–P7 compete for them. Table 2.1 gives the Allocation and Maximum-claim matrices actually used for the safety computation in this report (reproduced exactly from the Python simulation in Appendix A, Listing A.1, whose console output is shown in Section 5).
+Process	Alloc DB	Alloc FL	Alloc PR	Alloc BK	Max DB	Max FL	Max PR	Max BK
+P0	2	0	0	1	5	1	1	2
+P1	1	1	0	0	3	2	1	1
+P2	2	1	1	2	6	2	2	3
+P3	0	1	1	1	2	2	2	2
+P4	1	0	1	0	4	1	2	1
+P5	0	1	0	2	1	2	1	3
+P6	1	1	1	1	3	2	2	2
+P7	0	0	0	1	2	1	1	2
+Total resources = (DB 9, FL 6, PR 5, BK 9). Summing the Allocation column gives total allocated = (DB 7, FL 5, PR 4, BK 8), so Available = Total − Allocated = (DB 2, FL 1, PR 1, BK 1). The Need matrix (Max − Allocation) is:
+Process	Need DB	Need FL	Need PR	Need BK
+P0	3	1	1	1
+P1	2	1	1	1
+P2	4	1	1	1
+P3	2	1	1	1
+P4	3	1	1	1
+P5	1	1	1	1
+P6	2	1	1	1
+P7	2	1	1	1
+Running the Safety Algorithm (Work ← Available; repeatedly finish any process whose Need ≤ Work, adding its Allocation back into Work) against this exact data produces the following trace, captured verbatim from the program’s output:
+Work (initial) = Available = {DB:2, FL:1, PR:1, BK:1}
+  P0: Need(3,1,1,1) ≰ Work(2,1,1,1)  -> not yet
+  P1: Need(2,1,1,1) ≤ Work(2,1,1,1)  -> FINISH P1, Work=(3,2,1,1)
+  P2: Need(4,1,1,1) ≰ Work(3,2,1,1)  -> not yet
+  P3: Need(2,1,1,1) ≤ Work(3,2,1,1)  -> FINISH P3, Work=(3,3,2,2)
+  P4: Need(3,1,1,1) ≤ Work(3,3,2,2)  -> FINISH P4, Work=(4,3,3,2)
+  P5: Need(1,1,1,1) ≤ Work(4,3,3,2)  -> FINISH P5, Work=(4,4,3,4)
+  P6: Need(2,1,1,1) ≤ Work(4,4,3,4)  -> FINISH P6, Work=(5,5,4,5)
+  P7: Need(2,1,1,1) ≤ Work(5,5,4,5)  -> FINISH P7, Work=(5,5,4,6)
+  P0: Need(3,1,1,1) ≤ Work(5,5,4,6)  -> FINISH P0, Work=(7,5,4,7)
+  P2: Need(4,1,1,1) ≤ Work(7,5,4,7)  -> FINISH P2, Work=(9,6,5,9)
+ 
+Result: SAFE.  Safe sequence = < P1, P3, P4, P5, P6, P7, P0, P2 >
+
